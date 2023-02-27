@@ -9,6 +9,8 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	_ "github.com/redis/go-redis/v9"
+	"gitlab.com/idoko/rediboard/db"
+
 	"io"
 	"net/http"
 	"strconv"
@@ -19,7 +21,7 @@ const (
 	port     = 5432
 	user     = "postgres"
 	password = "123123"
-	dbname   = "httpserver"
+	dbname   = "postgres"
 )
 
 const (
@@ -27,16 +29,21 @@ const (
 	portR = 6379
 )
 
+type Database struct {
+	Client *redis.Client
+}
+
 var ab *sql.DB
+var redisD *db.Database
 var rdc *redis.Client
-var ctx = context.Background()
+var ctx = context.TODO()
 
 func main() {
 	psqlconn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable", host, port, user, password, dbname)
-	var errP error
-	ab, errP = sql.Open("postgres", psqlconn)
-	if errP != nil {
-		fmt.Printf("ERROR : %s ", errP)
+	var err error
+	ab, err = sql.Open("postgres", psqlconn)
+	if err != nil {
+		fmt.Printf("ERROR : %s ", err)
 		return
 	}
 	defer ab.Close()
@@ -45,24 +52,24 @@ func main() {
 	ec.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			fmt.Printf("%v", c.Request())
-			if err := next(c); err != nil {
+			if err = next(c); err != nil {
 				c.Error(err)
 			}
 			return nil
 		}
 	})
-
+	//sharding :
 	//redis :
-	rdc = redis.NewClient(&redis.Options{
-		Addr:     "127.0.0.1:6372",
-		Password: "",
-		DB:       0,
-	})
+	redisD, err = db.NewDatabase("localhost:6379")
+	if err != nil {
+		fmt.Printf("ERROR : %s ", err)
+		return
+	}
 
-	ec.GET("", GET)
-	//ec.PUT("/UPDATE", UPDATE)
-	ec.PUT("", POST)
-	//ec.DELETE("/DELETE", DELETE)
+	ec.GET("/GET", GET)
+	ec.PUT("/UPDATE", UPDATE)
+	ec.PUT("/INSERT", POST)
+	ec.DELETE("/DELETE", DELETE)
 	ec.Logger.Fatal(ec.Start("localhost:8081"))
 
 }
@@ -101,9 +108,10 @@ func UPDATE(c echo.Context) error {
 		fmt.Printf("ERROR: %v", err)
 		return err
 	}
-	result := fmt.Sprintf("yout newNote successfuly saved")
+	result := fmt.Sprintf("your newNote successfuly saved")
 	return c.String(http.StatusOK, result)
 }
+
 func GET(c echo.Context) error {
 	var note string
 	id := c.QueryParams().Get("id")
@@ -112,17 +120,16 @@ func GET(c echo.Context) error {
 		fmt.Printf("ERROR: %v", err)
 		return err
 	}
-	//// if we want to save notes in redis  that repeated most of 2 time :
+	// if we want to save notes in redis  that repeated most of 2 time :
 	KeyHLL := "key" + id
 	result, err := rdc.PFCount(ctx, KeyHLL).Result()
 	if err != nil {
 		return err
 	}
 	if result > 2 {
-		var resultNote string
-		resultNote, err = rdc.Get(ctx, id).Result()
+		resultNote := rdc.Get(ctx, id)
 		fmt.Printf("your codes note equal to : %s", resultNote)
-		return c.String(http.StatusOK, resultNote)
+		return c.String(http.StatusOK, resultNote.Val())
 	} else if result < 2 {
 		result++
 		err = rdc.PFAdd(ctx, KeyHLL, result).Err()
@@ -130,7 +137,7 @@ func GET(c echo.Context) error {
 			return err
 		}
 	}
-	err = ab.QueryRow("SELECT note FROM httpserver WHERE code = $1", code).Scan(&note)
+	err = ab.QueryRow("SELECT note FROM httpserver WHERE code = $1", int(code)).Scan(&note)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return echo.NewHTTPError(http.StatusNotFound, "Invalid id")
@@ -147,14 +154,14 @@ func GET(c echo.Context) error {
 	fmt.Printf("your codes note equal to : %s", note)
 	return c.String(http.StatusOK, note)
 }
+
 func POST(c echo.Context) error {
+	var codeNote int
 	content, err := io.ReadAll(c.Request().Body)
 	if err != nil {
 		return err
 	}
 	note := string(content)
-
-	var codeNote int
 	err = ab.QueryRow("INSERT INTO httpserver (note)VALUES ($1) RETURNING code", note).
 		Scan(&codeNote)
 	if err != nil {
